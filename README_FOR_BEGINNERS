@@ -1,0 +1,60 @@
+To compile this file, cd into the directory 
+(just above the src directory) with the Makefile.  
+The Makefile is a very powerful (but difficult to read) 
+manner of linking many files together, finding the libraries, and compiling.    
+Assuming you have gcc installed on your Mac, 
+you should be able to do the following.
+
+touch .dependencies
+make clean
+make all
+
+The code should compile, giving you an executable named "analyze_movie".
+
+*************************************
+If you struggle to get this compiled, 
+you can probably forgo the Makefile all together and simply compile with gcc 
+(you will need to google how to compile two files, 
+a *.c and *.h simultaneously).
+**************************************
+To use this, you need to be in a directory with the following two files:
+
+smtest
+generic_Px0
+
+Note that generic_Px0 has the system size from Pd0, 
+and needs to know how many frames are in smtest 
+and the time between frames.  
+The default time is 2000 in the simulation code I sent you, 
+so I left it at that.  
+The attached Pd0 code in the sample_data.zip 
+has a very short run time 160000 time steps - 
+it actually doesn't crystallize.  
+
+The C code will read the binary file smtest, 
+one frame at a time, and make the following files:
+
+velocity_data/XV_data_t=00000
+velocity_data/XV_data_t=02000
+velocity_data/XV_data_t=04000
+....
+velocity_data/XV_data_t=158000 
+
+where it increments in steps of "writemovietime" until the "maxtime"
+
+the format of the files is:
+
+#header information in "comments"
+
+id type x y vx vy
+
+you can look at the files to get a clearer idea, 
+but it is a movie frame with some extra information I use in analysis.  
+Once you have these files, 
+you are ready to use the python code to make an mp4 and watch the movie.
+
+#####Typically done by DM with:
+#####movie_post_processor/analysis_movie
+#####Which is hardcoded to work on smtest file using generic_Px0
+#####to set system size, number of particles, and calculate number of frames
+#####either with writemovietime and maxtime OR maxtemp and dt (or current)

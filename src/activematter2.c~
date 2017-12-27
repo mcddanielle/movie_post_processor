@@ -1,0 +1,683 @@
+/* Writing a fresh active matter code from scratch to try to address problems */
+/* that have arisen with the many-times-modified, formerly granular active */
+/* matter code.  Although I am writing this from nothing, I keep familiar */
+/* variable names. */
+/* Revisions log: 
+ * 7.17.15 Fixing minor error that prevented this from running under -O3.
+ * 7.15.15 Initial bare-bones simulation is running.  Next step is to
+           implement the NlogN lookup table algorithm.
+ * 7.14.15 Written
+ */
+
+//DM 2.2.16; C libraries to call
+#include<stdio.h>
+#include<math.h>
+#include<stdlib.h>
+#include<string.h>
+
+// Random number seed
+// DM 2.2.16;  don't change the random seed
+#define SEED 346710663
+
+//DM 2.2.6 "variables" that the compiler automatically translates 
+#define PI 3.14159265359
+#define TWOPI 6.28318530718
+
+//DM 2.2.16 data structure containing information about a particle
+//               that happens to be named "vortex"
+struct vortex{
+  int id;        //DM 2.2.16 count from 0 to N-1 particles in system
+  int color;     //DM 2.2.16 used to color shepherds/sheep fast/slow
+  double x;      //DM 2.2.16 x position of particle
+  double y;      //DM 2.2.16 y position of particle
+  double fx;     //DM 2.2.16 x-component of force on particle at time t
+  double fy;
+  double radius; //DM 2.2.16 all particles should have same radius
+  int runtime;  // time between tumbles
+  int clock;  // keeps track of running time
+  double runforce; // running force
+p  double theta; // current running angle
+  double runx;   //DM 2.2.16 x component of velocity, cos(theta)
+  double runy;   //DM 2.2.16 y component of velocity, sin(theta)
+};
+
+struct syssize{
+  double SX;    //DM Width of system
+  double SY;    //DM Height of system
+  double SX2;   //DM SX*SX  these get used often enough not to recalculate 
+  double SY2;   //DM Sy*SY  every time
+};
+
+struct mylookup{  //DM used for particle-particle force?
+  int num;        //DM number of particles at cell[i][j]
+  int *list;      //DM array of integers to track 
+                  //   specific particles in cell[i][j]
+};
+
+struct lookupdata{
+  int ncellsx;   //DM integer in cell to track particle locations (m total)
+  int ncellsy;   //DM n total
+  double xscale; //DM xscale = SX/m
+  double yscale; //DM yscale = SY/n
+};
+
+// Variable needed for MPI
+int myid;         //DM not used, we do serial runs, NOT parallel
+
+FILE *cmovie;     //DM color movie file pointer
+
+//DM run and tumble of individual particles
+void apply_self_propulsion(struct vortex *vortex,int nV);
+
+//DM interparticle forces
+void calc_hookean_force(struct vortex *vortex,int id1,int id2,double dr,
+			double dx,double dy,double deltar,double kspring);
+
+//DM look in nearby cells for particle interactions
+void cell_interact(struct vortex *vortex,int nV,struct mylookup **lookuptable,
+		   struct lookupdata lookupdata,double kspring,
+		   struct syssize syssize);
+
+//DM check whether particles overlap, and are within the box
+void checkpos(struct vortex *vortex,int id,struct syssize syssize);
+
+//DM calculate interparticle distances, including periodic boundary conditions
+void distance(double *dr,double *dx,double *dy,double x1,double y1,
+	      double x2,double y2,struct syssize syssize);
+
+//DM evolve the system based on particle locations (and forces)
+void do_md_step(struct vortex *vortex,int nV,int *time,double dt,
+		struct syssize syssize,int writemovietime,double kspring,
+		struct mylookup **lookuptable,struct lookupdata lookupdata);
+
+//DM initialize the simulation by setting down nV particles
+void fill_system_with_particles(int *nV,struct vortex *vortex,int maxnum,
+				struct syssize syssize,double radius,
+				int runtime,double runforce);
+
+//DM interparticle forces
+void find_forces(struct vortex *vortex,int nV,struct syssize syssize,
+		 double kspring,struct mylookup **lookuptable,
+		 struct lookupdata lookupdata);
+
+//DM numerical recipes in C subroutine to get a Maxwell-Boltzman Distribution
+double gasdev();
+
+//DM read in Pa0 
+void get_parameters_file(int *maxnum,struct syssize *syssize,double *radius,
+			 int *runtime,double *runforce,double *density,
+			 double *dt,int *maxtime,int *writemovietime,
+			 double *kspring,struct lookupdata *lookupdata,
+			 int *maxcell);
+
+//DM start the simulation
+void initialize(int *nV,struct vortex **vortex,struct syssize *syssize,
+		double *dt,int *time,int *maxtime,int *writemovietime,
+		double *kspring,struct mylookup ***lookuptable,
+		struct lookupdata *lookupdata);
+
+//DM find where the particles are currently sitting within the fixed cells
+void map_particles_to_cells(struct vortex *vortex,int nV,
+			    struct mylookup **lookuptable,
+			    struct lookupdata lookupdata);
+
+//DM move based on all forces, be sure of periodic boundary conditions
+void moveVortex(struct vortex *vortex,int nV,double dt,struct syssize syssize);
+
+//DM spring forces between particles
+void pair_interact(int id1,int id2,struct vortex *vortex,struct syssize syssize,
+		   double kspring);
+
+//DM neighbor look up
+void particle_particle_forces(struct vortex *vortex,int nV,
+			      struct syssize syssize,double kspring,
+			      struct mylookup **lookuptable,
+			      struct lookupdata lookupdata);
+
+//DM numerical recipes in C to get a good random number
+double Rand();
+
+//send position data to be written as a frame
+void write_movie(struct vortex *vortex,int nV,int time);
+
+//DM program starts here
+main()
+{
+  struct vortex *vortex;      //DM declare a linked list pointer 
+                              //which will contain particles
+  int nV;                     //DM Declare number of variables integer
+  struct syssize syssize;     //DM declare the system size struct
+  int time,maxtime;           //DM time = running clock time of system
+  double dt;                  //DM timestep t+=dt
+  int writemovietime;         //DM integer mutltiple of dt that sends 
+                              //DM data to be output
+  double kspring;             //DM strength of interparticle interaction
+  struct mylookup **lookuptable; //DM pointer to a pointer cells?  forces?
+  struct lookupdata lookupdata;  //DM cells?  forces?
+
+  //DM call the subroutine to read the parameters in from Pa0
+  initialize(&nV,&vortex,&syssize,&dt,&time,&maxtime,&writemovietime,&kspring,
+	     &lookuptable,&lookupdata);
+
+  //DM traditionally called "run_ramp_rate"
+  do{
+    do_md_step(vortex,nV,&time,dt,syssize,writemovietime,kspring,lookuptable,
+	       lookupdata);
+  }while(time<maxtime);
+  
+} //DM end of main subroutine
+
+//DM formerly "run_ramp_rate"
+//DM increments
+void do_md_step(struct vortex *vortex,int nV,int *time,double dt,
+		struct syssize syssize,int writemovietime,double kspring,
+		struct mylookup **lookuptable,struct lookupdata lookupdata)
+{
+  //DM examine particle locations and find all the forces
+  find_forces(vortex,nV,syssize,kspring,lookuptable,lookupdata);
+
+  //DM move forces using F_net = \eta v
+  moveVortex(vortex,nV,dt,syssize);
+
+  //DM insert measurements here:
+
+  //DM if time is an integer multiple of writemovietime, make a frame
+  if(!((*time)%writemovietime))
+    write_movie(vortex,nV,*time);
+
+  //DM increment the time pointer
+  (*time)++;
+}
+//-----------------------------------------------------------------
+void find_forces(struct vortex *vortex,int nV,struct syssize syssize,
+		 double kspring,struct mylookup **lookuptable,
+		 struct lookupdata lookupdata)
+{
+  //run and tumble model for particles
+  apply_self_propulsion(vortex,nV);
+  //interparticle spring forces
+  particle_particle_forces(vortex,nV,syssize,kspring,lookuptable,lookupdata);
+
+}
+//-----------------------------------------------------------------
+void apply_self_propulsion(struct vortex *vortex,int nV)
+{
+  int i;
+
+  for(i=0;i<nV;i++){
+    //run with definition of force and angle
+    vortex[i].fx+=vortex[i].runforce*vortex[i].runx;
+    vortex[i].fy+=vortex[i].runforce*vortex[i].runy;
+    //increment the particles internal clock
+    (vortex[i].clock)++;
+    //runtime=time to run straight before tumble
+
+    if(vortex[i].runtime){
+      if(vortex[i].clock>=vortex[i].runtime){   //if clock time==runtime
+	vortex[i].clock=0;                      //reset the clock to zero
+	vortex[i].theta=TWOPI*Rand();           //pick a new tumble angle
+	vortex[i].runx=cos(vortex[i].theta);    //find the x-component
+	vortex[i].runy=sin(vortex[i].theta);    //find the y-component
+      }
+    }
+  }
+}
+//-----------------------------------------------------------------
+void particle_particle_forces(struct vortex *vortex,int nV,
+			      struct syssize syssize,double kspring,
+			      struct mylookup **lookuptable,
+			      struct lookupdata lookupdata)
+{
+  int i,j;
+  //double dr,dx,dy;
+  //double deltar;
+
+  map_particles_to_cells(vortex,nV,lookuptable,lookupdata);
+  cell_interact(vortex,nV,lookuptable,lookupdata,kspring,syssize);
+
+  //DM BIG QUESTION!!!! ARE THE PARTICLES NON-INTERACTING?  CHECK THIS!!!
+  //I think it is fine, the next subroutine calls pair interact
+  //for(i=0;i<nV;i++){
+  //for(j=i+1;j<nV;j++){
+  //  pair_interact(i,j,vortex,syssize,kspring);
+  //}
+  //}
+}
+
+//-----------------------------------------------------------------
+//Check if particles are in neighboring cells
+void cell_interact(struct vortex *vortex,int nV,struct mylookup **lookuptable,
+		   struct lookupdata lookupdata,double kspring,
+		   struct syssize syssize)
+{
+  int i,j,k,kk;
+  int id1,id2;
+  int loop;
+  int indx,jndx;
+
+  for(i=0;i<lookupdata.ncellsx;i++){
+    for(j=0;j<lookupdata.ncellsy;j++){
+      for(k=0;k<lookuptable[i][j].num;k++){
+	id1=lookuptable[i][j].list[k];
+	for(loop=0;loop<5;loop++){
+	  switch(loop){
+	  case 0:
+	    // Same cell
+	    indx=i;
+	    jndx=j;
+	    break;
+	  case 1:
+	    // Cell to the right
+	    indx=i+1;
+	    jndx=j;
+	    if(indx>=lookupdata.ncellsx) indx-=lookupdata.ncellsx;
+	    break;
+	  case 2:
+	    // Cell to diagonal upper right
+	    indx=i+1;
+	    jndx=j+1;
+	    if(indx>=lookupdata.ncellsx) indx-=lookupdata.ncellsx;
+	    if(jndx>=lookupdata.ncellsy) jndx-=lookupdata.ncellsy;
+	    break;
+	  case 3:
+	    // Cell above
+	    indx=i;
+	    jndx=j+1;
+	    if(jndx>=lookupdata.ncellsy) jndx-=lookupdata.ncellsy;
+	    break;
+	  case 4:
+	    // Cell to diagonal upper left
+	    indx=i-1;
+	    jndx=j+1;
+	    if(indx<0) indx+=lookupdata.ncellsx;
+	    if(jndx>=lookupdata.ncellsy) jndx-=lookupdata.ncellsy;
+	    break;
+	  }
+	  for(kk=0;kk<lookuptable[indx][jndx].num;kk++){
+	    // Do each interacting pair only once
+	    if((!loop)&&(kk<=k)) continue;
+	    id2=lookuptable[indx][jndx].list[kk];
+	    pair_interact(id1,id2,vortex,syssize,kspring);
+	  }
+	}
+      }
+    }
+  }
+}
+
+//-----------------------------------------------------------------
+void pair_interact(int id1,int id2,struct vortex *vortex,struct syssize syssize,
+		   double kspring)
+{
+  double dr,dx,dy;  //dr = distance between particle centers
+  double deltar;    //deltar = possible deformation of spring-like particles
+  
+  //find interparticle distance between centers 
+  distance(&dr,&dx,&dy,vortex[id1].x,vortex[id1].y,vortex[id2].x,
+	   vortex[id2].y,syssize);
+  //calculate the possible overlap of two particles
+  deltar=dr-(vortex[id1].radius+vortex[id2].radius);
+
+  //if there is an overlap, calc the spring force
+  if(deltar<0)
+    calc_hookean_force(vortex,id1,id2,dr,dx,dy,deltar,kspring);
+}
+
+//-----------------------------------------------------------------
+void map_particles_to_cells(struct vortex *vortex,int nV,
+			    struct mylookup **lookuptable,
+			    struct lookupdata lookupdata)
+{
+  int i,j,k;
+  int xindex,yindex;
+
+  //loop through all cells, initialize zero particles/cell
+  for(j=0;j<lookupdata.ncellsy;j++){
+    for(i=0;i<lookupdata.ncellsx;i++){
+      lookuptable[i][j].num=0;
+    }
+  }
+
+  //find the cell by calculating the xindex and yindex
+  for(i=0;i<nV;i++){
+    xindex=floor(vortex[i].x*lookupdata.xscale);
+    yindex=floor(vortex[i].y*lookupdata.yscale);
+    //find the current number of particles in cell[i][j]
+    k=lookuptable[xindex][yindex].num;
+    //maintain a array list of particles in each cell, 
+    //the kth particle listed is the ith particle counted out of nV
+    lookuptable[xindex][yindex].list[k]=i;
+    //if you added a particle to a cell, 
+    //increment the number of particles counted
+    (lookuptable[xindex][yindex].num)++;
+  }
+}
+
+//-----------------------------------------------------------------
+void calc_hookean_force(struct vortex *vortex,int id1,int id2,double dr,
+			double dx,double dy,double delta,double kspring)
+{
+  double force,fx,fy,idr;
+
+  //find the force
+  force=delta*kspring;
+  //WARNING Here we assume that dr is well behaved and not very close to zero.
+  idr=1.0/dr;
+  //find the componets of force
+  fx=force*dx*idr;
+  fy=force*dy*idr;
+  //increment the total force via Newton's third law
+  vortex[id1].fx-=fx;
+  vortex[id1].fy-=fy;
+  vortex[id2].fx+=fx;
+  vortex[id2].fy+=fy;
+}
+
+//-----------------------------------------------------------------
+void moveVortex(struct vortex *vortex,int nV,double dt,struct syssize syssize)
+{
+  int i;
+
+  for(i=0;i<nV;i++){
+    //differential equation: f = eta v = dx dt
+    //therefore: dx = f dt
+    //dt is a set variable of the system, 
+    //and one you must be careful to calibrate, set, and keep throughout 
+    vortex[i].x+=vortex[i].fx*dt;
+    vortex[i].y+=vortex[i].fy*dt;
+
+    //check you didn't fall off the world
+    checkpos(vortex,i,syssize);
+    vortex[i].fx=0;
+    vortex[i].fy=0;
+  }
+}
+
+//-----------------------------------------------------------------
+void write_movie(struct vortex *vortex,int nV,int time)
+{
+  int i;
+  //use floats for two reasons: 
+  //(1) high precision not needed
+  //(2) old delplot code is a float code
+  float xout,yout,zout;
+
+  fwrite(&nV,sizeof(int),1,cmovie);
+  fwrite(&time,sizeof(int),1,cmovie);
+  for(i=0;i<nV;i++){
+    fwrite(&(vortex[i].color),sizeof(int),1,cmovie);
+    fwrite(&(vortex[i].id),sizeof(int),1,cmovie);
+    xout=(float)vortex[i].x;
+    yout=(float)vortex[i].y;
+    zout=(float)vortex[i].radius;
+    fwrite(&xout,sizeof(float),1,cmovie);
+    fwrite(&yout,sizeof(float),1,cmovie);
+    fwrite(&zout,sizeof(float),1,cmovie);
+  }
+}
+
+//-----------------------------------------------------------------
+void initialize(int *nV,struct vortex **vortex,struct syssize *syssize,
+		double *dt,int *time,int *maxtime,int *writemovietime,
+		double *kspring,struct mylookup ***lookuptable,
+		struct lookupdata *lookupdata)
+{
+  int maxnum;
+  double radius;
+  int runtime;
+  double runforce;
+  double density;
+  int i,j;
+  int maxcell;
+
+  myid=1;
+  *nV=0;
+  *time=0;
+  
+  get_parameters_file(&maxnum,syssize,&radius,&runtime,&runforce,&density,
+		      dt,maxtime,writemovietime,kspring,lookupdata,&maxcell);
+
+  cmovie=fopen("smtest","w");
+  
+  *vortex=malloc(maxnum*sizeof(struct vortex));
+  *lookuptable=(struct mylookup **)malloc((*lookupdata).ncellsx
+					  *sizeof(struct mylookup *));
+  for(i=0;i<(*lookupdata).ncellsx;i++){
+    (*lookuptable)[i]=malloc((*lookupdata).ncellsy*sizeof(struct mylookup));
+  }
+  for(j=0;j<(*lookupdata).ncellsy;j++){
+    for(i=0;i<(*lookupdata).ncellsx;i++){
+      (*lookuptable)[i][j].num=0;
+      (*lookuptable)[i][j].list=malloc(maxcell*sizeof(int));
+    }
+  }
+  
+  fill_system_with_particles(nV,*vortex,maxnum,*syssize,radius,runtime,
+			     runforce);
+}
+
+//-----------------------------------------------------------------
+void get_parameters_file(int *maxnum,struct syssize *syssize,double *radius,
+			 int *runtime,double *runforce,double *density,
+			 double *dt,int *maxtime,int *writemovietime,
+			 double *kspring,struct lookupdata *lookupdata,
+			 int *maxcell)
+{
+  FILE *in;
+  char trash[120];
+  double cellsize;
+  double resolution;
+
+  resolution=1e-6;
+
+  if((in=fopen("Pa0","r"))==NULL){
+    printf("Input file Pa0 not found\n");
+    exit(-1);
+  }
+  fscanf(in,"%s %lf\n",trash,density);
+  fscanf(in,"%s %lf\n",trash,&((*syssize).SX));
+  (*syssize).SX2=(*syssize).SX*0.5;
+  fscanf(in,"%s %lf\n",trash,&((*syssize).SY));
+  (*syssize).SY2=(*syssize).SY*0.5;
+  *maxnum=*density*(*syssize).SX*(*syssize).SY;
+  fscanf(in,"%s %lf\n",trash,radius);
+  fscanf(in,"%s %d\n",trash,runtime);
+  fscanf(in,"%s %lf\n",trash,runforce);
+  fscanf(in,"%s %lf\n",trash,dt);
+  fscanf(in,"%s %d\n",trash,maxtime);
+  fscanf(in,"%s %d\n",trash,writemovietime);
+  fscanf(in,"%s %lf\n",trash,kspring);
+  fscanf(in,"%s %lf\n",trash,&cellsize); // size of lookup cell
+  (*lookupdata).ncellsx=(int)(*syssize).SX/cellsize;
+  (*lookupdata).ncellsy=(int)(*syssize).SY/cellsize;
+  if(fabs((*lookupdata).ncellsx*cellsize-(*syssize).SX)>resolution){
+    printf("Error, SX mismatch with cell size\n");
+    exit(-1);
+  }
+  if(fabs((*lookupdata).ncellsy*cellsize-(*syssize).SY)>resolution){
+    printf("Error, SY mismatch with cell size\n");
+    exit(-1);
+  }
+  (*lookupdata).xscale=(double)(*lookupdata).ncellsx/(*syssize).SX;
+  (*lookupdata).yscale=(double)(*lookupdata).ncellsy/(*syssize).SY;
+  // Compute largest number of particles that could possibly fit
+  // inside a cell of this size
+  *maxcell=1+(int)cellsize*cellsize/(PI*(*radius)*(*radius));
+  fclose(in);
+}
+
+//-----------------------------------------------------------------
+void fill_system_with_particles(int *nV,struct vortex *vortex,int maxnum,
+				struct syssize syssize,double radius,
+				int runtime,double runforce)
+{
+  double xdrop,ydrop;
+  int overlap;
+  int i,k;
+  double dx,dy,dr;
+  int id;
+  int color;
+  int startnum;
+  
+  //DM pointer containing set number of particles in system
+  startnum=*nV;
+
+  for(k=startnum;k<maxnum;k++){
+    do{
+
+      //assume no overlap with particles
+      overlap=0;
+      //randomly chose a particle position
+      xdrop=syssize.SX*Rand();
+      ydrop=syssize.SY*Rand();
+      //iterate over all particles in system
+      for(i=0;i<*nV;i++){
+	//calculate all interparticle distances
+	distance(&dr,&dx,&dy,xdrop,ydrop,vortex[i].x,vortex[i].y,syssize);
+	if(dr<=2.0*radius){
+	  overlap=1;
+	  break;
+	}
+      }
+    }while(overlap);
+
+    id=*nV;
+    color=1;
+    vortex[id].id=id;
+    vortex[id].color=color;
+    vortex[id].x=xdrop;
+    vortex[id].y=ydrop;
+    vortex[id].fx=0;
+    vortex[id].fy=0;
+    vortex[id].radius=radius;
+    vortex[id].runtime=runtime;
+    vortex[id].clock=vortex[id].runtime*Rand();
+    vortex[id].runforce=runforce;
+    vortex[id].theta=TWOPI*Rand();
+    vortex[id].runx=cos(vortex[id].theta);
+    vortex[id].runy=sin(vortex[id].theta);
+
+    (*nV)++;
+  }
+  printf("added %d particles to system\n",*nV);
+}
+
+//-----------------------------------------------------------------
+//DM find distance between two particles, take p.b.c. into account
+void distance(double *dr,double *dx,double *dy,double x1,double y1,
+	      double x2,double y2,struct syssize syssize)
+{
+  double locdx,locdy;
+
+  //DM find interparticle distance in x
+  locdx=x1-x2;
+  //DM pbc in x direction
+  if(locdx>syssize.SX2) locdx-=syssize.SX;
+  if(locdx<=-syssize.SX2) locdx+=syssize.SX;
+
+  //DM find interparticle distance in y
+  locdy=y1-y2;
+  //DM pbc in y direction
+  if(locdy>syssize.SY2) locdy-=syssize.SY;
+  if(locdy<=-syssize.SY2) locdy+=syssize.SY;
+
+  //DM pass the values back to the pointers for the force calculation
+  *dr=sqrt(locdx*locdx+locdy*locdy);
+  *dx=locdx;
+  *dy=locdy;
+}
+//----------------------------------------------------------------
+//DM Check if particle has moved outside of the box, 
+//   if so, move it back into box
+void checkpos(struct vortex *vortex,int id,struct syssize syssize)
+{
+  if(vortex[id].x<0) vortex[id].x+=syssize.SX;
+  if(vortex[id].x>=syssize.SX) vortex[id].x-=syssize.SX;
+  if(vortex[id].y<0) vortex[id].y+=syssize.SY;
+  if(vortex[id].y>=syssize.SY) vortex[id].y-=syssize.SY;
+}
+/*========================== Rand()=================================*/
+/* Return a random floating point number between [0.0,1) */
+#define IA 16807
+#define IM 2147483647
+#define AM (1.0/IM)
+#define IQ 127773
+#define IR 2836
+#define NTAB 32
+#define NDIV (1+(IM-1)/NTAB)
+#define EPS 1.2e-7
+#define RNMX (1.0-EPS)
+
+double Rand()
+/* From Numerical Recipies p 280 */
+/* "Minimal" random nomber generator of Park and Miller with Bays-Durham */
+/* shuffle and added safeguards.  Returns a uniform random deviate between */
+/* 0.0 and 1.0 (exclusive of the endpoint values). idum is set to a */
+/* negative integer to initialize; thereafter, idum should not be altered */
+/* between successive deviates in a sequence.  RNMX should approximate */
+/* the largest floating value that is less than 1. */
+{
+  int j;
+  long k;
+  static long iy=0;
+  static long iv[NTAB];
+  double temp;
+  static long idum = -SEED;
+  static int very_first_time = 1;
+  
+  if (idum <=0 || !iy){  /* Initialize */
+    if (-(idum)<1) idum = 1;   /* Be sure to prevent idum = 0 */
+    else{
+      if(very_first_time){
+	idum=SEED+myid*13771;
+	very_first_time=0;
+      }
+      else idum = -idum;
+    }
+    for (j=NTAB+7;j>=0;j--){  /* Load the shuffle table after 8 warm-ups */
+      k=idum/IQ;
+      idum=IA*(idum-k*IQ)-IR*k;
+      if (idum<0) idum += IM;
+      if (j < NTAB) iv[j] = idum;
+    }
+    iy = iv[0];
+    idum = SEED;
+  }
+  k=idum/IQ;  /* Start here when not initializing */
+  idum=IA*(idum-k*IQ)-IR*k;  /*Compute idum=(IA*idum)%IM without overflows */
+  if (idum<0) idum +=IM;     /*by Schrage's method.                        */
+  j=iy/NDIV;    /* Will be in the range 0..NTAB-1.*/
+  iy = iv[j];  /*Output previously stored value and refill the shuffle table */
+  iv[j] = idum;
+  if ((temp=AM*iy) > RNMX) return RNMX; /* Because users don't expect */
+  else return temp;                     /* endpoint values.           */
+}
+/*=======================  gasdev ==============================*/
+/* Returns a normally distributed deviate with zero mean and unit */
+/* variance, using Rand() as the source of uniform deviates.*/
+/* From Numerical Recipies, p. 289 */
+double gasdev()
+{
+  double Rand();
+  static int iset=0;
+  static double gset;
+  double fac,rsq,v1,v2;
+  
+  if(iset==0){      /*We don't have an extra deviate handy, so */
+    do{
+      v1=2.0*Rand()-1.0;    /* Pick 2 uniform numbers in the square extending*/
+      v2=2.0*Rand()-1.0;    /* from -1 to +1 in each direction, */
+      rsq=v1*v1+v2*v2;      /* see if they are in the unit circle, */
+    } while (rsq >= 1.0 || rsq == 0.0);  /* and if they aren't, try again.*/
+    fac=sqrt(-2.0*log(rsq)/rsq);
+    /* Now make the Box-Muller transformation to get two normal */
+    /* deviates.  Return one and save the other for next time.*/
+    gset=v1*fac;
+    iset=1;  /*Set flag*/
+    return v2*fac;
+  }
+  else{  /*We have an extra deviate handy, */
+    iset=0;   /*so unset the flag,*/
+    return gset;  /*and return it.*/
+  }
+}

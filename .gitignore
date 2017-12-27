@@ -1,0 +1,6 @@
+test*
+analyze_*
+old_versions*
+#*
+*.bak
+*smtest*

@@ -1,0 +1,9 @@
+Nv 500
+SX 34.64102
+SY 36.0
+dt 0.004
+tot_time 160000
+writemovie 2000
+temperature 4.0 
+temp_incr 0.01
+drop 400

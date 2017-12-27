@@ -1,0 +1,91 @@
+This software is designed to work with 
+binary "movie" files, typically called smtest, 
+created by the molecular dynamics codes written and maintained 
+in the Reichhardt group.  
+
+To compile this file, cd into the directory 
+(just above the src directory) with the Makefile.  
+Simply type:
+
+make clean
+make all
+
+The code should compile, giving you an executable named "analyze_movie".
+*************************************
+If you struggle to get this compiled, 
+you can probably forgo the Makefile all together and simply compile with gcc 
+(google how to compile two files *.c and *.h simultaneously).
+**************************************
+To run the analysis of the movie, 
+you need to be in a directory with the following two files.
+
+smtest
+generic_Px0
+
+This has been hardcoded, but it is very easy to change in mpp.c.
+While the simulation time is embedded in the smtest file, 
+I wrote this analysis code to require the information 
+to start with.  
+My apologies if this seems overly burdensome, 
+but I like forloops better than while loops, 
+so it helped me organize and error check as I developed the code.
+
+Format of generic_Px0:
+***********************************
+Nv 90               #needed
+SX 36.0             #needed for PBC
+SY 36.0             #ditto
+dt 0.004            #needed for accurate calculation of average speed
+tot_time 2000000    #sets for loop control 
+	            #not necessary ONLY IF temperature/temp_inc provided
+writemovie 5000     #sets for loop control 
+                    #also needed for accurate calculation of average speed
+		    #so this is always necessary
+temperature 10.0    #sets for loop control 
+                    #can be 0.0 IF tot_time provided
+temp_inc 0.05       #sets for loop control
+                    #can be 0.0 IF tot_time provided
+drop 10000          #sets for loop control
+                    #can be 0.0 IF tot_time provided
+***************************************
+
+There are two methods to calculate the parameters needed for forloop control:
+1) Use the simulation times directly
+maxtime + 
+writemovietime, 
+assuming the starttime is 0
+
+2) If you prefer to calculate simulation times 
+   from the driving force /temperature
+maxtemp (or maxcurr), 
+temp_inc or curr_inc, and
+drop
+
+These methods should agree, 
+but the code will accept temp_inc=0.0, and 
+simply work with method (1).  
+HOWEVER IF YOU GIVE temp_inc any non-zero value
+the code will recalculate the total time with method (2) 
+and run the forloop accordingly
+
+The C code will read the binary file smtest, 
+one frame at a time, and make the following files:
+
+velocity_data/XV_data_t=00000000
+velocity_data/XV_data_t=00005000
+velocity_data/XV_data_t=00010000
+....
+velocity_data/XV_data_t=01995000 
+
+where it increments in steps of "writemovietime" until the "maxtime"
+
+the format of the files is:
+
+#header information in "comments"
+
+id type x y vx vy
+
+you can look at the files to get a clearer idea, 
+but it is a movie frame with some extra information I use in analysis.  
+Once you have these files, 
+you are ready to use the python codes to apply a voronoi analysis.

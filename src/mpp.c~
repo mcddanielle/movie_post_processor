@@ -1,0 +1,595 @@
+/* Read in Pa0
+ * Read in smtest
+ * many analysis techniques possible
+ */
+
+#include "mpp.h"
+
+int main(int argc, char **argv)
+{
+  struct vortex *vortex;      //DM declare a linked list pointer 
+                              //which will contain particles
+  int nV;                     //DM Declare number of variables integer
+  struct syssize syssize;     //DM declare the system size struct
+  int time,maxtime;           //DM time = running clock time of system
+  double dt;                  //DM timestep to integrate over
+  int writemovietime;         //DM integer that sends counts when to write frame
+  double period;
+
+  int movie_type = CMOVIE;    //DM hardwire for now
+  movie_type = SMOVIE;
+
+  printf("The movie type is %d \n",movie_type);
+
+  //DM call the subroutine to read the parameters in from Pa0
+  initialize(&nV,&vortex,&syssize,&dt,&time,&maxtime,&writemovietime,&period);
+
+   //open the ratcheting pointer
+   //if( (ratchet_pointer = fopen("count_ratchet", "w")) == NULL){
+   //  printf("Can't open %s.\n","count_ratchet");
+   //  exit(-1);
+   //}
+   //
+
+  //DM traditionally called "run_ramp_rate"
+  do{
+
+    parse_movie(vortex,&nV,&time,dt,syssize,writemovietime,movie_type,period);
+
+
+  }while(time<maxtime);
+
+  //---------------------------------------------------------------  
+  fclose(cmovie);
+  //fclose(ratchet_pointer);
+  //---------------------------------------------------------------  
+} 
+//---------------------------------------------------------------------------
+//DM end of main subroutine
+//---------------------------------------------------------------------------
+
+void parse_movie(struct vortex *vortex,int *nV,int *time,double dt,
+		 struct syssize syssize,int writemovietime,
+		 int movie_type,double period)
+{
+
+  read_frame(vortex,&nV,*time,dt,syssize,writemovietime,movie_type,period);
+
+  write_ascii_frame(vortex,nV,*time,syssize);
+
+  //DM increment the time pointer
+  (*time)+=writemovietime;
+}
+
+//-----------------------------------------------------------------
+//-----------------------------------------------------------------
+//-----------------------------------------------------------------
+void read_frame(struct vortex *vortex, int *nV, int time, double dt,
+		struct syssize syssize,int writemovietime,int movie_type,
+		double period)
+{
+
+  int check_nV;     //see if nV has changed
+  int check_time;   //check it is predicted time
+  int measure_dx_time = 1000; //6.2.2017 measure extended dx
+  int old_nV;       //check if nV changes
+  int i;
+
+  /*
+  int forward_ratchet=0;
+  int backward_ratchet=0;
+  int forward_ratchet2=0;
+  int backward_ratchet2=0;
+  */
+
+  float delta_t = writemovietime*dt;
+  float dx,dy,dr; //instantaneous parameters
+
+  fread(&check_nV,  sizeof(int),1,cmovie); //get number particles and check
+  fread(&check_time,sizeof(int),1,cmovie); //get time and check
+
+  //update number of vortices
+  (*nV) = check_nV;
+
+ 
+  for(i=0;i<(*nV);i++){
+
+    	//Save old particle positions if (time!=0)
+        //before reading in the new frame
+	if(check_time){
+	  vortex[i].x_old = vortex[i].x;
+	  vortex[i].y_old = vortex[i].y;
+	}
+
+	if(!( check_time%measure_dx_time )){
+	  vortex[i].accum_dx_old = vortex[i].x;
+	}
+
+
+	//read in the 'color' only if cmovie
+	if(movie_type == CMOVIE){
+	  fread(&(vortex[i].color), sizeof(int),  1,cmovie);
+	}
+	else{
+	  //just hardwire to an integer value
+	  vortex[i].color=1; 
+	}
+
+	fread(&(vortex[i].id),    sizeof(int),  1,cmovie); //all movies
+	fread(&(vortex[i].x),     sizeof(float),1,cmovie); //all movies
+	fread(&(vortex[i].y),     sizeof(float),1,cmovie); //all movies
+
+	//read in the 'radius' only if cmovie
+	if(movie_type == CMOVIE){
+	  fread(&(vortex[i].radius),sizeof(float),1,cmovie);
+	}
+	else{
+	  //just hardwire to a float value
+	  vortex[i].radius=1.0; 
+	}
+
+
+	if(check_time){
+
+	  //find the particle velocity
+	  distance(&dr,&dx,&dy,vortex[i].x,
+		               vortex[i].y,
+		               vortex[i].x_old,
+		               vortex[i].y_old,
+                               syssize);
+
+	  vortex[i].vx    = dx/delta_t;
+	  vortex[i].vy    = dy/delta_t;
+	  vortex[i].speed = dr/delta_t;
+	}
+	else{
+
+	  vortex[i].vx    = 0.0;
+	  vortex[i].vy    = 0.0;
+	  vortex[i].speed = 0.0;
+	}
+
+	if(!( check_time%measure_dx_time )&& check_time>0){
+	  vortex[i].accum_dx = vortex[i].x - vortex[i].accum_dx_old;
+	}
+
+	//
+	//float period = 36.0/24.0; //hardwired to 1.5
+	/*
+	float max = 5.0/6.0*period; 
+
+	float dx_max = fmodf(vortex[i].x,period); // - max;
+	float old_dx_max = fmodf(vortex[i].x_old,period); // - max; 
+
+	float dx_measure = period;
+
+	if ( (dx_max-max)<0.0 && (old_dx_max-max)>0.0){
+	  backward_ratchet+=1;
+	}
+	else if((dx_max-max)>0.0 && (old_dx_max-max)<0.0){
+	  forward_ratchet+=1;
+	}
+
+	if((vortex[i].accum_dx)>0.25*dx_measure){
+	  forward_ratchet2+=1;
+	}
+	else if((vortex[i].accum_dx)<-dx_measure){
+	  backward_ratchet2+=1;
+	}
+	*/
+
+  }
+
+
+  //fprintf(ratchet_pointer,"%d  %d  %d  %d  %d\n",check_time,backward_ratchet,forward_ratchet,backward_ratchet2,forward_ratchet2);
+
+  return;
+}
+
+//-----------------------------------------------------------------
+void write_ascii_frame(struct vortex *vortex,int nV,int time,
+		       struct syssize syssize)
+{
+
+  FILE *amovie;
+  int i;
+
+  int width = 10;
+
+  //make a directory to place the files:
+  mkdir("velocity_data",0700);
+
+  //create file names using string methods of c
+  char str_velocity[100]="velocity_data/XV_data_t=";
+  char str_time[10];
+  
+  sprintf(str_time,"%08d",time); //convert current to a string   
+  strcat(str_velocity,str_time);
+
+
+   //open the velocity ascii file
+   if( (amovie = fopen(str_velocity, "w")) == NULL){
+     printf("Can't open %s.\n",str_velocity);
+     exit(-1);
+   }
+
+   //open the dx statistics
+   //if( (dx_pointer = fopen("dx_statistics", "w")) == NULL){
+   //  printf("Can't open %s.\n","dx_statistics");
+   //  exit(-1);
+   //}
+   //
+
+
+   fprintf(amovie,"#Number of Vortices: %d\n",nV);
+   fprintf(amovie,"#time frame: %d\n",time);
+   fprintf(amovie,"#X Domain: %f\n",syssize.SX); 
+   fprintf(amovie,"#Y Domain: %f\n",syssize.SY); 
+
+
+   //declare and accummulate net kinetic energy here
+   //double system_kinetic = 0.0;
+
+  for(i=0;i<nV;i++){
+
+    //system_kinetic += vortex[i].speed*vortex[i].speed;
+
+    fprintf(amovie,"%5d ",i);
+    fprintf(amovie,"%2d ",vortex[i].color);
+    fprintf(amovie,"%-5.6f %-5.6f ",width,vortex[i].x,vortex[i].y);
+    fprintf(amovie,"%-5.6f %-5.6f %-5.6f \n", width,vortex[i].vx,	\
+	    vortex[i].vy,vortex[i].speed ); 
+
+    //fprintf(dx_pointer,"%5d %-5.6f \n",i,vortex[i].accum_dx);
+
+  }
+
+  //--------------------------------------------------------------------
+  //mulitply by 1/2 so KE = 1/2 m v^2, where m=1
+  //system_kinetic *= 0.5;
+
+   //open the kinetic energy file
+   //if( (kinetic_pointer = fopen("kinetic.dat", "a")) == NULL){
+   //  printf("Can't open %s.\n","kinetic.dat");
+   //  exit(-1);
+   //}
+
+  //print to a single column
+  //fprintf(kinetic_pointer,"%-5.6f \n", system_kinetic ); 
+
+  //fflush(kinetic_pointer);
+  //fclose(kinetic_pointer);
+  //---------------------------------------------------------------
+  //fflush(dx_pointer);
+  //fclose(dx_pointer);
+  //----------------------------------------------------------------
+  fflush(amovie);
+  fclose(amovie);
+  return;
+}
+
+//-----------------------------------------------------------------
+void initialize(int *nV,struct vortex **vortex,struct syssize *syssize,
+		double *dt,int *time,int *maxtime,int *writemovietime,
+		double *period)
+{
+  int maxnum;
+  double radius;
+  int runtime;
+  double runforce;
+  double density;
+  int i,j;
+  int maxcell;
+  
+  //if Pa0 do this
+  //read in Pa0 file
+  get_parameters_file(&maxnum,syssize,&radius,&runtime,&runforce,&density,
+		      dt,maxtime,writemovietime,period);
+
+  *nV = 0;
+  *time=0;  //first frame is written at this time
+
+  //formally this was a movie for writing,
+  //in this analysis code it is a movie for reading
+
+  //hardcode 
+  int get_data_smtest = 1;
+  int get_data_smAtest0 = 0;
+
+  if(get_data_smtest){
+    cmovie=fopen("smtest","rb");
+    printf("\nReading from binary file smtest\n");
+  }
+  else if(get_data_smAtest0){
+    cmovie=fopen("smAtest0","rb");
+    printf("\nReading from binary file smAtest0\n");
+  }
+
+  fflush(stdout);
+  
+  *vortex=malloc(maxnum*sizeof(struct vortex));
+
+  //printf("malloc successful! maxnum=%d",maxnum);
+  //fflush(stdout);
+
+  return;
+
+}
+
+//-----------------------------------------------------------------
+void get_parameters_file(int *maxnum,struct syssize *syssize,double *radius,
+			 int *runtime,double *runforce,double *density,
+			 double *dt,int *maxtime,int *writemovietime,
+			 double *period)
+{
+  FILE *in;
+  char trash[120];
+  double cellsize;   //not used
+  double resolution; //not used
+
+
+  double kspring; //not used
+  int maxcell;    //not used
+
+  resolution=1e-6;
+
+  //following are 1 if file exists, and 0 otherwise
+  int read_Pa0 = doesFileExist("Pa0");
+  int read_Pa0r = doesFileExist("Pa0r");
+  int read_generic = doesFileExist("generic_Px0");
+
+  //------------------------------------------------try opening Pa0
+  if(read_Pa0){
+    if((in=fopen("Pa0","r"))==NULL){
+      printf("Input file Pa0 not found\n");
+      exit(-1);  // exit if Pa0 not opened
+    }
+    printf("\n reading in Pa0\n");
+  }
+  //------------------------------------------------try opening Pa0r
+  else if(read_Pa0r){
+    if((in=fopen("Pa0r","r"))==NULL){
+      printf("Input file Pa0r not found\n");
+      exit(-1);  // exit if Pa0 not opened
+    }
+    printf("\n reading in Pa0r\n");
+  }
+  else if(read_generic){ //------------------------try opening generic_Px0
+    if((in=fopen("generic_Px0","r"))==NULL){
+      printf("Input file generic_Px0 not found\n");
+      exit(-1);  // only if couldn't open file for reading
+    }
+    printf("\n reading in generic_Px0\n");
+  }
+  else{
+    printf("Parameter files (Pa0, generic_Px0) not found\n");
+    exit(-1);  //no file found, game over
+  }
+
+  //for Pa0
+  //------------------------------------------------try opening Pa0
+  if(read_Pa0 || read_Pa0r){
+
+    if ( (fscanf(in,"%s %lf\n",trash,density)) != 2){
+      printf("Density is: %lf\n",density);
+      exit(-1);
+    }
+    printf("density is: %lf\n",density);
+
+    if ( (fscanf(in,"%s %lf\n",trash,&((*syssize).SX))) != 2){
+      printf("Couldn't load SX!\n");
+      exit(-1);
+    }
+    printf("SX is: %lf\n",(*syssize).SX);
+
+    (*syssize).SX2=(*syssize).SX*0.5;
+    //--------------------------------------------
+    if ( (fscanf(in,"%s %lf\n",trash,&((*syssize).SY))) != 2){
+      printf("Couldn't load SY!\n");
+      exit(-1);
+    }
+    printf("SY is: %lf\n",(*syssize).SY);
+    //-----------------------------------------------
+    (*syssize).SY2=(*syssize).SY*0.5;
+
+    if ( (fscanf(in,"%s %lf\n",trash,radius)) != 2){
+      printf("Couldn't load radius!\n");
+      exit(-1);
+    }
+    printf("radius is: %lf\n",*radius);
+
+    *maxnum=*density*(*syssize).SX*(*syssize).SY/(0.5*TWOPI*(*radius)*(*radius));
+    //intialized on grid, so we don't get maxnum:
+    int n_rows = (int) sqrt(*maxnum);
+    int m_cols = ceil(*maxnum/n_rows);
+
+    *maxnum=n_rows*m_cols;
+
+    printf("maxnum is: %d\n",*maxnum);
+
+    if ( (fscanf(in,"%s %d\n",trash,runtime)) != 2){
+      printf("Couldn't load runtime!\n");
+      exit(-1);
+    }
+
+    printf("runtime is: %d\n",*runtime);
+
+    if ( (fscanf(in,"%s %lf\n",trash,runforce)) != 2){
+      printf("Couldn't load runforce!\n");
+      exit(-1);
+    }
+    printf("runforce is: %lf\n",*runforce);
+
+    if ( (fscanf(in,"%s %lf\n",trash,dt)) != 2){
+      printf("Couldn't load dt!\n");
+      exit(-1);
+    }
+    printf("dt is: %lf\n",*dt);
+
+    if ( (fscanf(in,"%s %d\n",trash,maxtime)) != 2){
+      printf("Couldn't load maxtime!\n");
+      exit(-1);
+    }
+
+    printf("maxtime is: %d\n",*maxtime);
+
+    if ( (fscanf(in,"%s %d\n",trash,writemovietime)) != 2){
+      printf("Couldn't load number of vortices or time 9!\n");
+      exit(-1);
+    }
+
+    printf("writemovietime is: %d\n",*writemovietime);
+
+    if ( (fscanf(in,"%s %lf\n",trash,&kspring)) != 2){
+      printf("Couldn't load number of vortices or time 10!\n");
+      exit(-1);
+    }
+    if ( (fscanf(in,"%s %lf\n",trash,&cellsize)) != 2){
+      printf("Couldn't load number of vortices or time 11!\n");
+      exit(-1);
+    }
+    // size of lookup cell
+  }
+  else if(read_generic){
+
+    double temperature;
+    double temp_inc;
+    int drop;
+  
+    //read in the exact number of particles instead of calculating
+    if ( (fscanf(in,"%s %d\n",trash,maxnum)) != 2){
+      printf("Couldn't load number of vortices or time 12!\n");
+      exit(-1);
+    }
+    printf("maxnum is: %d\n",*maxnum);
+
+    if ( (fscanf(in,"%s %lf\n",trash,&((*syssize).SX))) != 2){
+      printf("Couldn't load number of vortices or time 13!\n");
+      exit(-1);
+    }
+    printf("SX is: %lf\n",(*syssize).SX);
+
+    (*syssize).SX2=(*syssize).SX*0.5;
+    if ( (fscanf(in,"%s %lf\n",trash,&((*syssize).SY))) != 2){
+      printf("Couldn't load number of vortices or time 14!\n");
+      exit(-1);
+    printf("SY is: %lf\n",(*syssize).SY);
+							    }
+    (*syssize).SY2=(*syssize).SY*0.5;
+
+    if ( (fscanf(in,"%s %lf\n",trash,dt)) != 2){
+      printf("Couldn't load number of vortices or time 15!\n");
+      exit(-1);
+    }
+    if( (fscanf(in,"%s %d\n",trash,maxtime)) != 2){
+      printf("Couldn't load number of vortices or time 16!\n");
+      exit(-1);
+    }
+    if( (fscanf(in,"%s %d\n",trash,writemovietime)) != 2){
+      printf("Couldn't load number of vortices or time 17!\n");
+      exit(-1);
+    }
+    if ( (fscanf(in,"%s %lf\n",trash,&temperature)) != 2){
+      printf("Couldn't load number of vortices or time 18!\n");
+      exit(-1);
+    }
+    if( (fscanf(in,"%s %lf\n",trash,&temp_inc))!= 2){
+	printf("Couldn't load number of vortices or time 19!\n");
+	exit(-1);
+      }
+    if ( (fscanf(in,"%s %d\n",trash,&drop)) != 2){
+	printf("Couldn't load number of vortices or time 20!\n");
+	exit(-1);
+      }
+    
+    if(temp_inc>0.0){
+      //printf("resetting maxtime to: %d\n",temperature/temp_inc*drop);
+      printf("resetting maxtime to: %f\n",temperature/temp_inc*drop);
+      *maxtime = (int) temperature/temp_inc*drop;
+      printf("maxtime: %d\n",*maxtime);
+    }
+    else{
+      printf("you better be sure you have the total time correct!\n");
+    }
+  }
+
+  if(read_Pa0r){
+
+     //substrateAp 1.0
+     //substrateN 24
+     //decifactor 50
+
+    double Ap;
+    int substrateN;
+    int decifactor;
+    if ( (fscanf(in,"%s %lf\n",trash,&Ap)) != 2){
+      printf("Couldn't load substrate strength Ap\n");
+      exit(-1);
+    }
+    printf("substrate strength is: %lf\n",Ap);
+
+    if( (fscanf(in,"%s %d\n",trash,&substrateN))!= 2){
+	printf("Couldn't load number of substrate troughs\n");
+	exit(-1);
+      }
+    *period=(*syssize).SX/substrateN;
+    printf("substrate period is: %lf\n",*period);
+
+    if ( (fscanf(in,"%s %d\n",trash,&decifactor)) != 2){
+	printf("Couldn't load decifactor!\n");
+	exit(-1);
+      }
+    printf("decifactor is: %d\n",decifactor);
+
+}
+
+
+  fclose(in);
+
+  return;
+}
+//-----------------------------------------------------------------
+//-----------------------------------------------------------------
+
+
+//-----------------------------------------------------------------
+//DM find distance between two particles, take p.b.c. into account
+//-----------------------------------------------------------------
+void distance(float *dr,float *dx,float *dy,float x1,float y1,
+	      float x2,float y2,struct syssize syssize)
+{
+  float locdx,locdy;
+
+  //DM find interparticle distance in x
+  locdx=x1-x2;
+  //DM pbc in x direction
+  if(locdx>syssize.SX2) locdx-=syssize.SX;
+  if(locdx<=-syssize.SX2) locdx+=syssize.SX;
+
+  //DM find interparticle distance in y
+  locdy=y1-y2;
+  //DM pbc in y direction
+  if(locdy>syssize.SY2) locdy-=syssize.SY;
+  if(locdy<=-syssize.SY2) locdy+=syssize.SY;
+
+  //DM pass the values back to the pointers for the force calculation
+  *dr=sqrt(locdx*locdx+locdy*locdy);
+  *dx=locdx;
+  *dy=locdy;
+}
+//----------------------------------------------------------------
+//DM Check if particle has moved outside of the box, 
+//   if so, move it back into box
+void checkpos(struct vortex *vortex,int id,struct syssize syssize)
+{
+  if(vortex[id].x<0) vortex[id].x+=syssize.SX;
+  if(vortex[id].x>=syssize.SX) vortex[id].x-=syssize.SX;
+  if(vortex[id].y<0) vortex[id].y+=syssize.SY;
+  if(vortex[id].y>=syssize.SY) vortex[id].y-=syssize.SY;
+}
+
+int doesFileExist(const char *filename) {
+    struct stat st;
+    int result = stat(filename, &st);
+    return result == 0;  //if file does exist, this returns true
+}

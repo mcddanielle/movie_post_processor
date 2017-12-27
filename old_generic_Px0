@@ -1,0 +1,6 @@
+Nv 256
+SX 36.5
+SY 36.5
+dt 0.01
+tot_time 20000000
+writemovie 500
